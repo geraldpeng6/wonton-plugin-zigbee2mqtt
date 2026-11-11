@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["serial_port"],
+  "x-wonton-order": ["serial_port", "adapter"],
+  "properties": {
+    "serial_port": {
+      "type": "string",
+      "default": "/dev/zigbee",
+      "pattern": "^(tcp://|mdns://|/dev/)",
+      "x-wonton-title": { "zh": "协调器地址", "en": "Coordinator address", "zh-Hant": "協調器位址", "ja": "コーディネーターアドレス" },
+      "x-wonton-description": {
+        "zh": "USB 棒是安装时选的设备路径；网络协调器填 tcp://地址:端口",
+        "en": "USB sticks use the device path picked at install; network coordinators use tcp://host:port",
+        "zh-Hant": "USB 棒是安裝時選的裝置路徑；網路協調器填 tcp://位址:連接埠",
+        "ja": "USB スティックはインストール時に選んだデバイスパス、ネットワークコーディネーターは tcp://ホスト:ポート"
+      }
+    },
+    "adapter": {
+      "type": "string",
+      "enum": ["zstack", "ember", "ezsp", "deconz", "zigate", "zboss", "zoh"],
+      "x-wonton-title": { "zh": "适配器类型", "en": "Adapter type", "zh-Hant": "配接器類型", "ja": "アダプター種類" },
+      "x-wonton-description": {
+        "zh": "不选则自动探测；探测不对时再按协调器型号选",
+        "en": "Leave unset to autodetect; pick per coordinator model if detection fails",
+        "zh-Hant": "不選則自動探測；探測不對時再按協調器型號選",
+        "ja": "未選択なら自動検出、失敗時に型式に合わせて選ぶ"
+      },
+      "x-wonton-enum-titles": {
+        "zstack": { "zh": "ZStack（TI）", "en": "ZStack (TI)", "zh-Hant": "ZStack（TI）", "ja": "ZStack（TI）" },
+        "ember": { "zh": "Ember（Silabs）", "en": "Ember (Silabs)", "zh-Hant": "Ember（Silabs）", "ja": "Ember（Silabs）" },
+        "ezsp": { "zh": "EZSP（Silabs 旧）", "en": "EZSP (Silabs legacy)", "zh-Hant": "EZSP（Silabs 舊）", "ja": "EZSP（Silabs 旧）" },
+        "deconz": { "zh": "deCONZ（Dresden）", "en": "deCONZ (Dresden)", "zh-Hant": "deCONZ（Dresden）", "ja": "deCONZ（Dresden）" },
+        "zigate": { "zh": "ZiGate", "en": "ZiGate", "zh-Hant": "ZiGate", "ja": "ZiGate" },
+        "zboss": { "zh": "ZBOSS（Nordic）", "en": "ZBOSS (Nordic)", "zh-Hant": "ZBOSS（Nordic）", "ja": "ZBOSS（Nordic）" },
+        "zoh": { "zh": "zoh", "en": "zoh", "zh-Hant": "zoh", "ja": "zoh" }
+      }
+    }
+  }
+}
