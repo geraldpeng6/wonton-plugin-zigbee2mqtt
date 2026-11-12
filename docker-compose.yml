@@ -1,12 +1,13 @@
 # Zigbee2MQTT：用 USB Zigbee 棒或网络协调器接入各厂商的 Zigbee 设备，状态和控制经 MQTT 收发。
-# MQTT 来自 x-wonton.mqtt 能力的提供方（同批的 mosquitto 插件），地址由核心注入，插件不自带 broker。
+# MQTT 来自 x-wonton.mqtt 能力的提供方（同批的 mosquitto 插件），地址和按使用方签发的账号由核心注入，插件不自带 broker。
 services:
   init:
     # 上游没有 configuration.yaml 时会在 8080 起 onboarding 服务并挡住正式启动；
     # 只在文件不存在时种下静态配置，运行期会变的值（MQTT 地址、前端令牌、协调器）走环境变量。
+    # cp 会连 Docker 配置挂载的 0444 权限一起带过来，上游启动时要改写这份文件，种下后补上属主写位。
     image: ghcr.io/koenkk/zigbee2mqtt:2.14.3@sha256:fb4a6b0f6868ad1cd6a9996479802b2420e599c3463b62bbff8c8cd9a908f43a
     user: "${PUID}:${PGID}"
-    entrypoint: ["/bin/sh", "-c", "test -f /app/data/configuration.yaml || cp /seed/configuration.yaml /app/data/configuration.yaml"]
+    entrypoint: ["/bin/sh", "-c", "test -f /app/data/configuration.yaml || { cp /seed/configuration.yaml /app/data/configuration.yaml && chmod 644 /app/data/configuration.yaml; }"]
     volumes:
       - ${WONTON_APP_DATA}:/app/data
     configs:
@@ -27,9 +28,13 @@ services:
       # 上游规则：ZIGBEE2MQTT_CONFIG_* 优先于 configuration.yaml（嵌套键按下划线展开）。
       # 上游对空字符串的覆盖不生效，所以不选适配器（空值注入）等于交给上游自动探测。
       ZIGBEE2MQTT_CONFIG_MQTT_SERVER: ${WONTON_X_WONTON_MQTT_URL}
+      # 提供方按使用方签发的账号：用户名是插件 ID，密码是能力凭据（ADR-0053）。
+      ZIGBEE2MQTT_CONFIG_MQTT_USER: ${WONTON_APP_ID}
+      ZIGBEE2MQTT_CONFIG_MQTT_PASSWORD: ${WONTON_X_WONTON_MQTT_KEY:-}
       ZIGBEE2MQTT_CONFIG_FRONTEND_AUTH_TOKEN: ${WONTON_SECRET_FRONTEND_TOKEN}
       ZIGBEE2MQTT_CONFIG_SERIAL_PORT: ${WONTON_SETTING_SERIAL_PORT}
-      ZIGBEE2MQTT_CONFIG_SERIAL_ADAPTER: ${WONTON_SETTING_ADAPTER}
+      # 设置没选适配器时注入空串；上游对空串的覆盖不生效，等于交给上游自动探测。
+      ZIGBEE2MQTT_CONFIG_SERIAL_ADAPTER: ${WONTON_SETTING_ADAPTER:-}
     volumes:
       - ${WONTON_APP_DATA}:/app/data
     healthcheck:
@@ -45,7 +50,7 @@ configs:
     file: config/configuration.yaml
 
 x-wonton:
-  spec: "0.12"
+  spec: "0.13"
   id: io.zigbee2mqtt.zigbee2mqtt
   version: 0.1.0
   kind: app
@@ -82,9 +87,13 @@ x-wonton:
     service: zigbee2mqtt
     port: 8080
     sso: none
-  # 串口设备授权（devices.serial，target /dev/zigbee）核心尚未支持：权限和授权字段都会被拒。
-  # 未声明时插件装得上但协调器连不上（启动即报错退出），不绕道 privileged 或宿主网络换设备访问。
-  permissions: []
+  # 网络协调器（tcp://、mdns://）在主人的局域网里，没有出网权限连不上。
+  permissions: [network.egress]
+  # 串口设备授权（ADR-0036 的 devices.serial 权限加 x-wonton.devices 授权块）核心未实现，实测两者都被拒：
+  # 权限报 "isn't supported by this home server yet"，x-wonton.devices 报 unknown field。
+  # 落地后加 permissions: [devices.serial] 和
+  # devices: { serial: [{ service: zigbee2mqtt, target: /dev/zigbee, optional: true }] }；
+  # 不绕道 privileged 或宿主网络换设备访问。
   secrets:
     frontend_token:
       # 前端 WebSocket 的访问令牌；网关登录之外的第二道门，换密钥走插件详情页。
