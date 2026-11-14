@@ -1,78 +1,104 @@
-# 示例插件：nginx 显示一个网页，向登录的人问好。改成自己的应用见 https://github.com/wontonapp/wonton-docs/blob/main/develop.md#写插件。
+# Zigbee2MQTT：用 USB Zigbee 棒或网络协调器接入各厂商的 Zigbee 设备，状态和控制经 MQTT 收发。
+# MQTT 来自 x-wonton.mqtt 能力的提供方（同批的 mosquitto 插件），地址和按使用方签发的账号由核心注入，插件不自带 broker。
 services:
-  web:
-    # 镜像按摘要固定（多架构镜像写清单列表的摘要），标签只给人看。
-    image: nginx:1.31.8-alpine@sha256:713fc2ebfd92e8217db451477182ee91944b123d2b1ee9fd5a8c6e91ca6c3a11
-    environment:
-      # 网关代登录：SSI 回显的 Remote-User 只信核心带来的。官方镜像启动时对 templates 目录里的
-      # *.template 做 envsubst，把下面的地址换进 nginx 配置（见 web/default.conf.template）。
-      WONTON_CORE_ADDRESS: ${WONTON_CORE_ADDRESS}
-    # 包里的文件经 configs 交给容器（核心在启动前写进去），不能用卷挂载。
+  init:
+    # 上游没有 configuration.yaml 时会在 8080 起 onboarding 服务并挡住正式启动；
+    # 只在文件不存在时种下静态配置，运行期会变的值（MQTT 地址、前端令牌、协调器）走环境变量。
+    # cp 会连 Docker 配置挂载的 0444 权限一起带过来，上游启动时要改写这份文件，种下后补上属主写位。
+    image: ghcr.io/koenkk/zigbee2mqtt:2.14.3@sha256:fb4a6b0f6868ad1cd6a9996479802b2420e599c3463b62bbff8c8cd9a908f43a
+    user: "${PUID}:${PGID}"
+    entrypoint: ["/bin/sh", "-c", "test -f /app/data/configuration.yaml || { cp /seed/configuration.yaml /app/data/configuration.yaml && chmod 644 /app/data/configuration.yaml; }"]
+    volumes:
+      - ${WONTON_APP_DATA}:/app/data
     configs:
-      - source: site
-        target: /etc/nginx/templates/default.conf.template
-      - source: page
-        target: /usr/share/nginx/html/index.html
-      - source: tokens
-        target: /usr/share/nginx/html/tokens.css
+      - source: seed
+        target: /seed/configuration.yaml
+    network_mode: none
+    restart: "no"
+
+  zigbee2mqtt:
+    image: ghcr.io/koenkk/zigbee2mqtt:2.14.3@sha256:fb4a6b0f6868ad1cd6a9996479802b2420e599c3463b62bbff8c8cd9a908f43a
+    # 上游镜像默认 root；官方 rootless 方案是 user + 串口组，数据目录属主规则正好交给 PUID:PGID。
+    user: "${PUID}:${PGID}"
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    environment:
+      TZ: ${TZ}
+      # 上游规则：ZIGBEE2MQTT_CONFIG_* 优先于 configuration.yaml（嵌套键按下划线展开）。
+      # 上游对空字符串的覆盖不生效，所以不选适配器（空值注入）等于交给上游自动探测。
+      ZIGBEE2MQTT_CONFIG_MQTT_SERVER: ${WONTON_X_WONTON_MQTT_URL}
+      # 提供方按使用方签发的账号：用户名是插件 ID，密码是能力凭据（ADR-0053）。
+      ZIGBEE2MQTT_CONFIG_MQTT_USER: ${WONTON_APP_ID}
+      ZIGBEE2MQTT_CONFIG_MQTT_PASSWORD: ${WONTON_X_WONTON_MQTT_KEY:-}
+      ZIGBEE2MQTT_CONFIG_FRONTEND_AUTH_TOKEN: ${WONTON_SECRET_FRONTEND_TOKEN}
+      ZIGBEE2MQTT_CONFIG_SERIAL_PORT: ${WONTON_SETTING_SERIAL_PORT}
+      # 设置没选适配器时注入空串；上游对空串的覆盖不生效，等于交给上游自动探测。
+      ZIGBEE2MQTT_CONFIG_SERIAL_ADAPTER: ${WONTON_SETTING_ADAPTER:-}
+    volumes:
+      - ${WONTON_APP_DATA}:/app/data
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      # frontend 在启动链最后起：它应答了，说明 MQTT 已连上、协调器已打开。
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
       interval: 30s
       timeout: 5s
-      start_period: 30s
-      start_interval: 1s
+      start_period: 60s
+      start_interval: 2s
 
 configs:
-  site:
-    file: web/default.conf.template
-  page:
-    file: web/index.html
-  tokens:
-    file: web/tokens.css
+  seed:
+    file: config/configuration.yaml
 
 x-wonton:
-  spec: "0.6"
-  # 换成你自己的：反向域名形式，装上以后不能改。
-  id: app.example.hello
-  version: 0.1.1
+  spec: "0.14"
+  id: io.zigbee2mqtt.zigbee2mqtt
+  version: 0.1.0
   kind: app
-  title: { zh: 你好, en: Hello }
-  description: { zh: 向登录的人问好的示例网页, en: An example page that greets whoever is signed in }
+  title: { zh: 智能家居网关（Zigbee2MQTT）, en: Zigbee Home Hub (Zigbee2MQTT) }
+  description:
+    zh: 像家里的万能遥控器接收器，用一个小棒子把各家的 Zigbee 传感器、开关接进来，不依赖小米、涂鸦的网关。
+    en: Connect Zigbee sensors and switches from any brand with a small USB stick, no vendor hub required.
   icon: icon.svg
   notices: [NOTICE]
-  screenshots: [screenshots/home.png]
-  author: { name: Example }
-  homepage: https://nginx.org
-  # 应用（这里是 nginx）的许可证；插件包自己的许可证写在仓库的 LICENSE 里。
-  license: BSD-2-Clause
+  settings: settings.schema.json
+  author: { name: geraldpeng6, url: https://github.com/geraldpeng6 }
+  homepage: https://www.zigbee2mqtt.io
+  license: GPL-3.0-only
   tags:
-    zh: [工具]
-    en: [Tools]
+    zh: [智能家居, 智能配件]
+    en: [Home, Devices]
   about:
     zh: |
-      一个示例网页：登录以后，页面会向你问好。新建插件时可以照着改。
+      把一个 Zigbee 小棒（协调器）插到家里服务器上，各种品牌的 Zigbee 传感器、开关、灯就能统一接入，像给家里装了一个万能接收器。设备状态和控制都发到 MQTT，Home Assistant 等工具可以直接用。
+
+      打开网页可以看设备、改名字、控制开关。支持的设备列表见 zigbee2mqtt.io。
+
+      需要先装一个提供 MQTT 的插件（如 mosquitto）；装插件时按提示选协调器设备。用网络协调器（不插棒子）时在插件设置里把协调器地址改成 tcp://地址:端口。
     en: |
-      An example page: once you are signed in, the page says hello. Copy it as a starting point for a new plugin.
-  release_notes: { zh: 名字和说明更新。, en: Product name and description update. }
+      Plug a Zigbee coordinator stick into your home server and connect Zigbee sensors, switches and lights from any brand through one hub. Device state and control flow over MQTT, ready for Home Assistant and other tools.
+
+      Open the web page to see devices, rename them and control them. Supported devices are listed at zigbee2mqtt.io.
+
+      Requires a plugin that provides MQTT (such as mosquitto); pick the coordinator device when prompted during install. For a network coordinator (no stick), set the coordinator address to tcp://host:port in the plugin settings.
+  release_notes:
+    zh: 首个版本：Zigbee 设备接入，网页管理和 MQTT 转发。
+    en: "First release: Zigbee device support with web management and MQTT."
   webui:
-    service: web
-    port: 80
-    # 示例页回显网关注入的用户名，见 https://github.com/wontonapp/wonton-docs/blob/main/plugin-spec.md#网关代登录sso-proxy。
-    sso: proxy
-    proxy:
-      headers:
-        Remote-User: "{user}"
-  # 能放进侧边栏“我的应用”的页面，见 https://github.com/wontonapp/wonton-docs/blob/main/plugin-spec.md#应用页面tabs。放不放由用户决定。
-  tabs:
-    - id: home
-      title: { zh: 主页, en: Home }
-      icon: tabs/home.svg
-      icon_selected: tabs/home-fill.svg
-      path: /
-      # 这个页面没做适配，用默认的 inset：从状态栏下沿开始，页面不用管安全区。
-      # 想让内容从状态栏后面滚过，写 layout: edge-to-edge，并用 --wonton-inset-* 留出系统安全区的位置。
-  permissions: []
-  # 上游 nginx 官方镜像，amd64 和 arm64 都有；上游没写最低内存，按本机空闲实测取整（实测约 24M，取 64M）。
+    service: zigbee2mqtt
+    port: 8080
+    sso: none
+  # 网络协调器（tcp://、mdns://）在主人的局域网里，没有出网权限连不上。
+  permissions: [network.egress, devices.serial]
+  # 核心在安装时让主人从宿主的串口设备中选一个，选中的设备挂到固定的容器路径。
+  # optional 允许用户改用 tcp:// 或 mdns:// 网络协调器而不选择串口设备。
+  devices:
+    serial:
+      - { service: zigbee2mqtt, target: /dev/zigbee, optional: true }
+  secrets:
+    frontend_token:
+      # 前端 WebSocket 的访问令牌；网关登录之外的第二道门，换密钥走插件详情页。
+      generate: { bytes: 32 }
+  requires: [x-wonton.mqtt]
   requirements:
     arch: [amd64, arm64]
-    memory: 64M
+    memory: 384M
