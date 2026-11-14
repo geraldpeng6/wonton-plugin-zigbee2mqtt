@@ -8,8 +8,8 @@
 
 ## 使用前提
 
-- **MQTT**：需要安装一个提供 `x-wonton.mqtt` 能力的插件（同批的 mosquitto）。装本插件时云吞会列出可用的提供方，选中即接上；MQTT 地址由云吞注入，不用手填。
-- **协调器**：安装时按提示选择插在服务器上的 Zigbee 棒（优先用 `/dev/serial/by-id/` 路径，拔插后编号不变）。支持的硬件和适配器类型见[上游适配器文档](https://www.zigbee2mqtt.io/guide/configuration/adapter-settings.html)；适配器类型不填时上游自动探测。
+- **MQTT**：需要安装一个提供 `x-wonton.mqtt` 能力的插件（如 mosquitto），地址和按使用方签发的账号由云吞注入，不用手填。真实消息收发的限制见下文。
+- **协调器**：安装时可从设备列表选择插在服务器上的 Zigbee 棒，核心会把它挂到容器里的 `/dev/zigbee`；也可以在设置里填 `tcp://地址:端口` 或 `mdns://...` 使用网络协调器。支持的硬件和适配器类型见[上游适配器文档](https://www.zigbee2mqtt.io/guide/configuration/adapter-settings.html)；适配器类型不填时上游自动探测。
 
 ## 网页和令牌
 
@@ -17,9 +17,9 @@
 
 ## 已知限制
 
-- **串口设备授权未接入**：清单需要按 [ADR 的设备授权写法](https://github.com/wontonapp/wonton)声明 `devices.serial`（target `/dev/zigbee`），云吞核心尚未支持该权限，装上的版本连不到协调器（启动即报错退出）。核心支持后补上声明，本插件不用 privileged 或宿主网络绕过。
-- **MQTT 提供方地址**：清单按规范引用 `WONTON_X_WONTON_MQTT_URL`，核心尚未为第三方能力（`x-` 前缀）注入这个变量，装的时候会报变量未定义。核心支持后即可安装。
-- 运行期不出网；只有设备 OTA 固件更新按需从厂商服务器下载，本插件未申请出网权限，OTA 不可用。
+- **没有协调器时不能运行**：没有真实 Zigbee 棒或网络协调器时，上游会报协调器连接错误并退出，安装失败，不会显示为健康。
+- **MQTT 数据面未接通**：第三方 `x-wonton.mqtt` 能力只转发 HTTP，不能承载 MQTT 的 TCP 长连接。本包需等核心实现 [ADR-0092](https://github.com/wontonapp/wonton/blob/main/docs/adr/0092-capability-tcp-relay.md) 后改用 `mqtt` 能力并验证收发；在此之前不收录商店。
+- `network.egress` 用于连接局域网里的网络协调器，也允许上游下载设备 OTA 固件；OTA 未验证。
 - Agent 控制：上游只有 MQTT 主题接口（`zigbee2mqtt/bridge/request/*`），没有 HTTP API 和 MCP，Agent 经 MQTT 使用。
 
 ## 图标来源与许可

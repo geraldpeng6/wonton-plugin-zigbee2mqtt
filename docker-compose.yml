@@ -50,7 +50,7 @@ configs:
     file: config/configuration.yaml
 
 x-wonton:
-  spec: "0.13"
+  spec: "0.14"
   id: io.zigbee2mqtt.zigbee2mqtt
   version: 0.1.0
   kind: app
@@ -88,12 +88,12 @@ x-wonton:
     port: 8080
     sso: none
   # 网络协调器（tcp://、mdns://）在主人的局域网里，没有出网权限连不上。
-  permissions: [network.egress]
-  # 串口设备授权（ADR-0036 的 devices.serial 权限加 x-wonton.devices 授权块）核心未实现，实测两者都被拒：
-  # 权限报 "isn't supported by this home server yet"，x-wonton.devices 报 unknown field。
-  # 落地后加 permissions: [devices.serial] 和
-  # devices: { serial: [{ service: zigbee2mqtt, target: /dev/zigbee, optional: true }] }；
-  # 不绕道 privileged 或宿主网络换设备访问。
+  permissions: [network.egress, devices.serial]
+  # 核心在安装时让主人从宿主的串口设备中选一个，选中的设备挂到固定的容器路径。
+  # optional 允许用户改用 tcp:// 或 mdns:// 网络协调器而不选择串口设备。
+  devices:
+    serial:
+      - { service: zigbee2mqtt, target: /dev/zigbee, optional: true }
   secrets:
     frontend_token:
       # 前端 WebSocket 的访问令牌；网关登录之外的第二道门，换密钥走插件详情页。
