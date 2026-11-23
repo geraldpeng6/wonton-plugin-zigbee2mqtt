@@ -28,7 +28,7 @@ services:
       # 上游规则：ZIGBEE2MQTT_CONFIG_* 优先于 configuration.yaml（嵌套键按下划线展开）。
       # 上游对空字符串的覆盖不生效，所以不选适配器（空值注入）等于交给上游自动探测。
       ZIGBEE2MQTT_CONFIG_MQTT_SERVER: ${WONTON_X_WONTON_MQTT_URL}
-      # 提供方按使用方签发的账号：用户名是插件 ID，密码是能力凭据（ADR-0053）。
+      # 提供方按使用方签发的账号：用户名是插件 ID，密码是能力凭据。
       ZIGBEE2MQTT_CONFIG_MQTT_USER: ${WONTON_APP_ID}
       ZIGBEE2MQTT_CONFIG_MQTT_PASSWORD: ${WONTON_X_WONTON_MQTT_KEY:-}
       ZIGBEE2MQTT_CONFIG_FRONTEND_AUTH_TOKEN: ${WONTON_SECRET_FRONTEND_TOKEN}
@@ -50,7 +50,7 @@ configs:
     file: config/configuration.yaml
 
 x-wonton:
-  spec: "0.14"
+  spec: "0.15"
   id: io.zigbee2mqtt.zigbee2mqtt
   version: 0.1.0
   kind: app
@@ -96,8 +96,11 @@ x-wonton:
       - { service: zigbee2mqtt, target: /dev/zigbee, optional: true }
   secrets:
     frontend_token:
-      # 前端 WebSocket 的访问令牌；网关登录之外的第二道门，换密钥走插件详情页。
+      # 前端 WebSocket 的访问令牌，网关登录之外的第二道门。应用没有账号体系，主人要靠它进网页，
+      # 所以用 show_owner 让主人能在插件详情页查看；v0.1 不能轮换。
       generate: { bytes: 32 }
+      show_owner:
+        label: { zh: 前端访问令牌, en: Frontend access token, zh-Hant: 前端存取權杖, ja: フロントエンドのアクセストークン }
   requires: [x-wonton.mqtt]
   requirements:
     arch: [amd64, arm64]

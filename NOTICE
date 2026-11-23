@@ -4,7 +4,7 @@ Zigbee2MQTT 标志
 图标：Zigbee2MQTT 官方标志（蜜蜂和 MQTT 字样）。
 来源：https://github.com/Koenkk/zigbee2mqtt/blob/9c505fd75f503a91a61244d6f0efa0e37d81a7b0/images/logo_vector.svg
 版权：Zigbee2MQTT 项目（Koen Kanters）及贡献者；仓库未为该 SVG 单独列出版权行，项目许可证见同提交的 LICENSE 文件。
-处理：原样使用官方 SVG 的图形、比例和颜色，未改色、未变形、未裁切、未重绘。
+处理：原样使用官方 SVG 的图形、比例和颜色，未改色、未变形、未裁切、未重绘。标志本身四角透明，照规范在图形下面铺了一块白底补成满幅。
 
 Zigbee2MQTT 使用 GNU GPL v3；上游许可证全文：
 https://github.com/Koenkk/zigbee2mqtt/blob/9c505fd75f503a91a61244d6f0efa0e37d81a7b0/LICENSE

@@ -22,10 +22,10 @@
       "enum": ["zstack", "ember", "ezsp", "deconz", "zigate", "zboss", "zoh"],
       "x-wonton-title": { "zh": "适配器类型", "en": "Adapter type", "zh-Hant": "配接器類型", "ja": "アダプター種類" },
       "x-wonton-description": {
-        "zh": "不选则自动探测；探测不对时再按协调器型号选",
-        "en": "Leave unset to autodetect; pick per coordinator model if detection fails",
-        "zh-Hant": "不選則自動探測；探測不對時再按協調器型號選",
-        "ja": "未選択なら自動検出、失敗時に型式に合わせて選ぶ"
+        "zh": "USB 棒一般不用选（自动探测）；网络协调器按型号选，mdns:// 会按广播的服务类型判断，可留空",
+        "en": "USB sticks usually need no selection (autodetect); pick per model for network coordinators, mdns:// infers it from the advertised service type",
+        "zh-Hant": "USB 棒一般不用選（自動探測）；網路協調器按型號選，mdns:// 會按廣播的服務類型判斷，可留空",
+        "ja": "USB スティックは通常未選択で構いません（自動検出）。ネットワークコーディネーターは型式に合わせて選びます（mdns:// は広告されたサービスタイプで判断するため未選択でも可）"
       },
       "x-wonton-enum-titles": {
         "zstack": { "zh": "ZStack（TI）", "en": "ZStack (TI)", "zh-Hant": "ZStack（TI）", "ja": "ZStack（TI）" },
