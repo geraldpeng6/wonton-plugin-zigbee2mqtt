@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # 插件合并前的端到端冒烟：用工作区的插件起一套一次性开发环境，六项真实请求，不用 mock。
-#   scripts/dev.sh smoke [--upgrade-from <tag>]
-# 六项：装得上 / 网页打得开 / 用户身份能用 / 工具 Bot 调得到 / 升级保数据 / 重装保数据。任何 FAIL 退出非 0。
-# 插件自己的探测在 scripts/smoke-probes.sh，写法见模板里的这个文件。
+#   scripts/dev.sh smoke [--upgrade-from <tag> | --no-upgrade <原因>] [--setting <名字>=<值>]…
+# 六项：装得上 / 网页打得开 / 用户身份能用 / 工具 Bot 调得到 / 升级保数据 / 重装保数据；探针写了 extra_check 时另有一项附加检查。任何 FAIL 退出非 0。
+# 插件自己的探测在 scripts/smoke-probes.sh，写法见模板里的这个文件；一个仓库放多家插件时，WONTON_PLUGIN 指插件目录，
+# 探针放在那个目录的 smoke-probes.sh。
 # 作者已有的 .wonton 不动：整个工作区复制到临时目录，用冒烟自己的实例，跑完删掉容器、网络、卷和目录。
+# 输入变量、输出格式和退出码是和正式冒烟共用的约定，见模板仓库的 docs/smoke.md。
 #
 # --upgrade-from：从哪个 tag 升级验证数据；默认取 git describe 到的最近 tag，本仓库没有 tag 时“升级保数据”记 N/A。
 # WONTON_DEV_EGRESS_PROXY：给了就先把它配成核心的出口代理（插件冷启动要出网时用），不给就不配。
+# WONTON_SMOKE_TMPDIR：临时目录放在哪（默认 /tmp）；/tmp 是内存盘的主机换到磁盘上，路径越短越好（见下面的 107 字节）。
 set -uo pipefail
 # shellcheck source=scripts/lib.sh
 . "$(dirname "$0")/lib.sh"
@@ -16,30 +19,50 @@ set -uo pipefail
 
 usage() { sed -n '2,4p' "$0" >&2; exit 2; }
 upgrade_from=""
+no_upgrade=""
+cli_settings=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --upgrade-from) [[ $# -ge 2 && -n "$2" ]] || usage; upgrade_from="$2"; shift 2 ;;
+    --no-upgrade) [[ $# -ge 2 && -n "$2" ]] || usage; no_upgrade="$2"; shift 2 ;;
+    --setting) [[ $# -ge 2 && "$2" == ?*=* ]] || usage; cli_settings+=("$2"); shift 2 ;;
     *) usage ;;
   esac
 done
+[[ -z "$upgrade_from" || -z "$no_upgrade" ]] || usage
 
 for tool in docker curl jq python3 timeout nice flock git; do
   need "$tool"
 done
+need_plugin
 
-mkdir -p "$root/.wonton"
-exec 9>"$root/.wonton/smoke.lock"
-flock -n 9 || die "同一仓库的另一套冒烟正在跑"
+# 冒烟只访问本机网关和栈内地址：主机为了上外网导出了代理变量时，这些请求被代理截走会回 502。
+# 套件自己的 curl 都带 --noproxy；这里兜住探针里没带的。
+for name in no_proxy NO_PROXY; do
+  export "$name=${!name:+${!name},}localhost,127.0.0.1,::1,.localhost,wonton.internal,.wonton.internal"
+done
+
+caller_dir="$PWD"
+# 锁和日志按插件放：多插件仓库的几家可以同时各跑一套冒烟。
+smoke_home="$root/.wonton"
+[[ "$plugin_rel" == . ]] || smoke_home="$root/.wonton/${plugin_rel//\//-}"
+mkdir -p "$smoke_home"
+exec 9>"$smoke_home/smoke.lock"
+flock -n 9 || die "同一个插件的另一套冒烟正在跑"
 
 # 状态目录放短路径：宿主网络插件的中继套接字在 <状态>/data/apps/<插件 id 把 . 换成 ->/relay/webui.sock，unix 套接字
 # 路径最多 107 字节。/tmp/ws.XXXXXX/s 是 16 字节，id 最长 63 时正好 107。不用 TMPDIR：macOS 的 TMPDIR 在
 # /var/folders/… 下，本身就有 40 多字节。
-work="$(mktemp -d /tmp/ws.XXXXXX)"
+# 换了 WONTON_SMOKE_TMPDIR 时每多一个字节，插件 id 能用的长度就少一个字节。
+tmp_root="${WONTON_SMOKE_TMPDIR:-/tmp}"
+[[ -d "$tmp_root" ]] || die "WONTON_SMOKE_TMPDIR 不是目录：$tmp_root"
+work="$(mktemp -d "${tmp_root%/}/ws.XXXXXX")"
 copy="$work/repo"
-LOG="$root/.wonton/smoke.log"
+LOG="$smoke_home/smoke.log"
 : >"$LOG"
 instance="smoke$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"
 SMOKE_DIR="$copy"
+if [[ "$plugin_rel" == . ]]; then SMOKE_PLUGIN="$copy"; else SMOKE_PLUGIN="$copy/$plugin_rel"; fi
 SMOKE_DEV_STATE="$work/s"
 # 数据标记是个空文件（与 e2e 冒烟的约定一致）：插件钩子只当它是文件，不往里建目录。
 SMOKE_STATE="$work/data-marker"
@@ -58,8 +81,13 @@ cleanup() {
   image="$(sed -n 's/^WONTON_CORE_IMAGE=//p' "$SMOKE_DEV_STATE/.env" 2>/dev/null | tail -1)"
   if [[ -f "$SMOKE_DEV_STATE/.env" ]]; then
     say "清理实例 $instance"
-    (cd "$copy" && nice -n 19 timeout 900 scripts/dev.sh purge --yes) >>"$LOG" 2>&1
+    # 状态目录不在工作区里，purge 要经 probes_dev 带上 WONTON_DEV_STATE，不然它找不到 .env，核心栈整套留下。
+    probes_dev_t 900 purge --yes >>"$LOG" 2>&1
   fi
+  # 核心栈（核心、Matrix、身份提供方……）是 Compose 项目 wonton-<实例>，不带 wonton.instance 标签：purge 没成时按项目名删。
+  docker ps -aq --filter "label=com.docker.compose.project=wonton-$instance" | xargs -r docker rm -f >/dev/null 2>&1
+  docker network ls -q --filter "label=com.docker.compose.project=wonton-$instance" | xargs -r docker network rm >/dev/null 2>&1
+  docker volume ls -q --filter "label=com.docker.compose.project=wonton-$instance" | xargs -r docker volume rm >/dev/null 2>&1
   docker ps -aq --filter "label=wonton.instance=$instance" | xargs -r docker rm -f >/dev/null 2>&1
   docker network ls -q --filter "label=wonton.instance=$instance" | xargs -r docker network rm >/dev/null 2>&1
   docker volume ls -q --filter "label=wonton.instance=$instance" | xargs -r docker volume rm >/dev/null 2>&1
@@ -70,7 +98,8 @@ cleanup() {
     rm -rf "$work" 2>/dev/null
   fi
   local left
-  left="$(docker ps -aq --filter "label=wonton.instance=$instance" | wc -l)"
+  left="$({ docker ps -aq --filter "label=wonton.instance=$instance"
+    docker ps -aq --filter "label=com.docker.compose.project=wonton-$instance"; } | sort -u | wc -l)"
   say "残留资源（实例 $instance）：$left"
   if [[ "$left" != 0 ]]; then
     echo "FAIL 清理：残留 $left 个资源"
@@ -109,9 +138,14 @@ if [[ -n "${WONTON_SMOKE_MAX_STACKS:-}" ]]; then
   done
 fi
 
-# 升级验证的起点：--upgrade-from 指定的 tag，或 git describe 到的最近 tag；没有 tag 就不测升级。
-if [[ -z "$upgrade_from" ]]; then
-  upgrade_from="$(git -C "$root" describe --tags --abbrev=0 2>/dev/null || true)"
+# 升级验证的起点：--upgrade-from 指定的 tag，或 git describe 到的最近 tag；没有 tag 或给了 --no-upgrade 就不测升级。
+if [[ -n "$no_upgrade" ]]; then
+  :
+elif [[ -z "$upgrade_from" ]]; then
+  # 多插件仓库的 tag 按目录名分开（<目录名>/v<版本>），只认这家的。
+  describe_match=()
+  [[ "$plugin_rel" == . ]] || describe_match=(--match "$(tag_glob)")
+  upgrade_from="$(git -C "$root" describe --tags --abbrev=0 "${describe_match[@]}" 2>/dev/null || true)"
 else
   git -C "$root" rev-parse -q --verify "refs/tags/$upgrade_from^{commit}" >/dev/null ||
     die "本机没有 tag $upgrade_from"
@@ -126,13 +160,59 @@ tar -C "$root" --exclude=.wonton --exclude=.git -cf - . | tar -C "$copy" -xf - |
 # dev.sh 从复制出来的工作区里 git archive 出 tag：.git 用符号链接指回原仓库，不复制对象。
 [[ ! -d "$root/.git" ]] || ln -s "$root/.git" "$copy/.git"
 chmod -R a+rX "$copy"
+# Compose 解析短卷时会把未注入的 `${WONTON_SHARE_NAME:?…}` 冒号误判为路径字段。
+# 冒烟只读清单，按 storage.share 声明填临时目录；正式安装时核心会注入同名变量。
+facts_dir="$work/compose-facts"
+mkdir "$facts_dir"
+cp -a "$SMOKE_PLUGIN/." "$facts_dir/"
+share_env_file="$work/share.env"
+python3 - "$SMOKE_PLUGIN/docker-compose.yml" "$facts_dir/docker-compose.yml" "$work/shares" >"$share_env_file" <<'PY'
+import re, sys
 
-probes_facts "$copy"
+source = open(sys.argv[1], encoding="utf-8").read()
+lines = source.splitlines()
+try:
+    start = next(i for i, line in enumerate(lines) if line == "x-wonton:")
+except StopIteration:
+    raise SystemExit("清单没有 x-wonton")
+block = []
+for line in lines[start + 1:]:
+    if line and not line[0].isspace():
+        break
+    block.append(line)
+manifest = "\n".join(block)
+permissions = re.search(r"(?ms)^  permissions:\s*(.*?)(?=^  \S|\Z)", manifest)
+text = re.sub(r"#.*", "", permissions.group(1) if permissions else "")
+names = sorted(set(re.findall(r"storage\.share\.([a-z0-9]+(?:-[a-z0-9]+)*):(?:read|write)", text)))
+for name in names:
+    variable = "WONTON_SHARE_" + name.upper().replace("-", "_")
+    print(f"{variable}={sys.argv[3]}/{name}")
+    source = re.sub(r"\$\{" + re.escape(variable) + r"[^}]*\}", f"{sys.argv[3]}/{name}", source)
+open(sys.argv[2], "w", encoding="utf-8").write(source)
+PY
+while IFS='=' read -r name path; do
+  [[ -z "$name" ]] || { mkdir -p "$path"; export "$name=$path"; }
+done <"$share_env_file"
+
+probes_facts "$facts_dir"
 probes_load
+# 插件设置值：探针声明的 SMOKE_SETTINGS 在前，命令行的 --setting 在后，同名时后给的算数。每次安装都带上。
+setting_args=()
+for pair in "${SMOKE_SETTINGS[@]}" "${cli_settings[@]}"; do
+  setting_args+=(--setting "$pair")
+done
 
+gpu_rc=0
+"$copy/scripts/smoke-gpu.sh" "$facts_dir" || gpu_rc=$?
+if ((gpu_rc == 77)); then
+  say "跳过：需要显卡，没跑"
+  exit 77
+elif ((gpu_rc != 0)); then
+  die "GPU 冒烟前置检查失败（退出码 $gpu_rc）"
+fi
 # ---------- 1. 装得上 ----------
 say "1. 装得上（check、install、running healthy）"
-chk_out="$(cd "$copy" && nice -n 19 timeout 900 scripts/check.sh 2>&1)" && chk_rc=0 || chk_rc=$?
+chk_out="$(cd "$copy" && WONTON_PLUGIN="$SMOKE_PLUGIN" nice -n 19 timeout 900 scripts/check.sh 2>&1)" && chk_rc=0 || chk_rc=$?
 printf '%s\n' "$chk_out" >>"$LOG"
 chk_first="$(head -1 <<<"$chk_out")"
 if ((chk_rc != 0)); then
@@ -173,6 +253,13 @@ say "Hermes：$hermes_line"
 if [[ "$(jq -r '(."x-wonton".permissions // []) | index("models") // empty' <<<"$PROBES_FACTS")" != "" ]]; then
   magpie_line="$(probes_status_wait ai.usemagpie.magpie 30)" ||
     { fail 装得上 "模型网关不是 running healthy：$magpie_line"; exit 0; }
+  if [[ -n "${WONTON_DEV_MODEL_BASE_URL:-}" ]]; then
+    say "接模型上游 $WONTON_DEV_MODEL_BASE_URL（${WONTON_DEV_MODEL:-}）"
+    # 冒烟在副本目录里跑 dev.sh：相对路径的 key 文件按调用时的目录算。
+    probes_dev model "$WONTON_DEV_MODEL_BASE_URL" "${WONTON_DEV_MODEL:-}" \
+      "$(cd "$caller_dir" && realpath "${WONTON_DEV_MODEL_KEY_FILE:-}")" >>"$LOG" 2>&1 ||
+      { fail 装得上 "接模型上游失败，看 $LOG"; exit 0; }
+  fi
 fi
 
 if declare -F before_install >/dev/null; then
@@ -185,7 +272,7 @@ data_wrote=0
 data_upgrade_base=0
 if [[ "$DATA_NA" != 1 ]] && (( DATA_HOOKS )) && [[ -n "$upgrade_from" ]]; then
   say "装 tag $upgrade_from（写数据后升级）"
-  if probes_dev_t 600 install --yes "$upgrade_from" >>"$LOG" 2>&1 &&
+  if probes_dev_t 600 install --yes "${setting_args[@]}" "$upgrade_from" >>"$LOG" 2>&1 &&
     probes_status_wait "$PROBES_PLUGIN_ID" 40 >/dev/null; then
     data_upgrade_base=1
     # 钩子要用网页地址和用户会话：这一轮在主安装之前，probes_run 还没取过、也没登录过。
@@ -201,7 +288,7 @@ fi
 # 装过升级起点时，核心不接受 install 覆盖已装的插件（同一版本号也一样）：升级用 reinstall，保留数据。
 install_cmd=install
 ((data_upgrade_base == 1)) && install_cmd=reinstall
-if ! probes_dev "$install_cmd" --yes >>"$LOG" 2>&1; then
+if ! probes_dev "$install_cmd" --yes "${setting_args[@]}" >>"$LOG" 2>&1; then
   fail 装得上 "dev.sh $install_cmd --yes 失败，看 $LOG"
   for item in 网页打得开 用户身份能用 工具Bot调得到; do fail "$item" "装不上"; done
   exit 0
@@ -214,7 +301,7 @@ else
 fi
 
 # 探针部分：网页打得开、用户身份能用、工具 Bot 调得到，和 dev.sh probes 共用。
-probes_run web_assert identity_check mcp
+probes_run web_assert identity_check mcp extra_check
 
 # ---------- 5/6. 升级/重装保数据 ----------
 say "5/6. 升级保数据、重装保数据"
@@ -227,6 +314,8 @@ elif (( DATA_HOOKS == 0 )); then
 else
   if [[ -n "$upgrade_from" && "$data_upgrade_base" == 1 && "$data_wrote" == 1 ]]; then
     probes_data_check 升级保数据 "升级自 tag $upgrade_from"
+  elif [[ -n "$no_upgrade" ]]; then
+    na 升级保数据 "$no_upgrade（调用方给了 --no-upgrade），只测重装"
   elif [[ -z "$upgrade_from" ]]; then
     na 升级保数据 "本仓库没有 tag，只测重装（可用 --upgrade-from 指定）"
   fi
@@ -236,7 +325,7 @@ else
     fi
   fi
   if [[ "$data_wrote" == 1 ]]; then
-    if probes_dev_t 900 reinstall --yes >>"$LOG" 2>&1 &&
+    if probes_dev_t 900 reinstall --yes "${setting_args[@]}" >>"$LOG" 2>&1 &&
       probes_status_wait "$PROBES_PLUGIN_ID" 40 >/dev/null; then
       probes_data_check 重装保数据 "reinstall 后"
     else

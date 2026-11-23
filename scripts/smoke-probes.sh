@@ -23,6 +23,7 @@
 #         room_wait() {
 #           local marker="probe-$RANDOM" url
 #           url="$(docker exec "wonton-$SMOKE_INSTANCE--${SMOKE_PLUGIN_ID//./-}--web" printenv WONTON_NOTIFY_URL)"
+#           probes_evidence_start
 #           probes_owner_room_wait 120 "$marker" & local pid=$!
 #           docker exec "wonton-$SMOKE_INSTANCE--${SMOKE_PLUGIN_ID//./-}--web" wget -q -O /dev/null \
 #             --header 'Content-Type: application/json' --post-data "{\"title\":\"$marker\"}" "$url"
@@ -33,14 +34,23 @@
 #       一条数据并把标记原样存进 $SMOKE_STATE，data_check 读回标记去应用里找，对不上就打印看到了什么并返回非 0。
 #       应用不存用户数据时写 DATA_NA=1（两项记 N/A）。
 # 装之前要准备（如先配出口代理）：写 before_install。
+# 设置：清单有 settings 时，冒烟装插件要填的值写 export SMOKE_SETTINGS=(名字=值 …)（如要用户同意许可的必填项），
+#       不写进 Schema 的 default；临时多给几项用 scripts/dev.sh smoke --setting 名字=值。
+# 附加检查：六项之外还要验的（发一条通知、经网关真调一次模型等）写 extra_check，在工具项之后跑、限 EXTRA_TIMEOUT 秒
+#       （默认 600），结果另记一行“附加检查”，失败同样算冒烟失败。一次要验好几件事时，每件用
+#       extra_item <PASS|FAIL|N/A> <子项> <说明> 记一行，结果行是“附加检查·<子项>”，任一子项 FAIL 即失败。
+#       Agent 插件（扮演用户手机发加密消息、确认卡片、名单外不应答等）组合 scripts/agent-probes.sh 的 agent_check_*，
+#       写法见那个文件的开头。
+#       失败时套件收集核心、Mailpit 和本插件容器的证据；发信前调用 probes_evidence_start，日志窗口从发送时刻起，
+#       不调用时从 extra_check 开始取。取证只在失败时追加到日志，收件箱为空不能代替私聊里的投递证据。
+# 探针自己起的容器（如一次性的对端服务）加上标签 wonton.instance=$SMOKE_INSTANCE，冒烟结束时随实例一起删掉。
 
-web_assert() { grep -q '你好'; }   # 示例页的标题
+# 没有用户体系，身份项记 N/A；没有 mcp，工具项由套件按清单记 N/A。
+# “重装保留用户数据”要应用能写才行，冒烟机没有协调器，应用起不到可写状态（上游行为：协调器打不开就退出）。
+web_assert() { grep -q '<title>Zigbee2MQTT</title>'; }
 
-identity_check() { # 页面回显的就是网关注入的用户名；示例页不存数据，也不拿数据判断身份
-  local page
-  page="$(dweb /)" || { echo "页面失败：$page"; return 1; }
-  grep -qF "你好，$SMOKE_OWNER" <<<"$page" || { echo "页面没回显用户 $SMOKE_OWNER：$(head -c 120 <<<"$page")"; return 1; }
-}
+export IDENTITY_NA=1
+export SMOKE_NOTE="应用没有用户体系：网页认证靠云吞网关加前端访问令牌"
 
 # 数据：合并前要验证“升级/重装不丢用户数据”时写 data_write 和 data_check（两个都写才跑）：
 #   data_write 用随机标记写一条数据，把标记原样覆盖写进 $SMOKE_STATE（一个已建好的空文件，不是目录）；data_check 读回标记、去应用里找，

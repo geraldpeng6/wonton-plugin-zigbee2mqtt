@@ -1,0 +1,5 @@
+# 只在数据目录还没有这份文件时种下（见 compose 的 init 服务）。
+# MQTT 地址、前端令牌、协调器地址由核心注入的环境变量（ZIGBEE2MQTT_CONFIG_*）覆盖，不写在这里。
+frontend:
+  enabled: true
+  port: 8080

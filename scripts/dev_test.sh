@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# dev.sh 的 logs、diag 在没有 Docker 的机器上测：假的 docker 和 curl 放在 PATH 前面，只用真的 bash、python3。
+# dev.sh 的 logs、diag 和 smoke-gpu.sh 的核心输出解析在没有 Docker 的机器上测：假的 docker 和 curl 放在 PATH 前面，只用真的 bash、python3。
 # 结果看退出码和输出，不连网。
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -8,6 +8,11 @@ trap 'rm -rf "$work"' EXIT
 bin="$work/bin"
 state="$work/state"
 mkdir -p "$bin" "$state"
+# 套件复制到一个单插件布局的假仓库里跑：一个仓库放多家插件时根目录没有清单，用例不该跟着仓库布局变。
+repo="$work/repo"
+mkdir -p "$repo"
+cp -R "$root/scripts" "$repo/"
+: >"$repo/docker-compose.yml"
 touch "$state/compose.yaml"
 printf 'WONTON_INSTANCE=test\n' >"$state/.env"
 
@@ -24,6 +29,8 @@ case "${1:-}" in
     esac
     ;;
   ps) printf 'wonton-test--app-web--web\nwonton-test--app-web--web--bot\nwonton-test--db--db\n' ;;
+  info) [[ "${FAKE_INFO_FAIL:-}" != 1 ]] || exit 1; printf '%s\n' "${FAKE_OS:-Ubuntu 24.04 LTS}" ;;
+  network) [[ -n "${FAKE_GATEWAY:-}" ]] && printf '%s\n' "$FAKE_GATEWAY" ;;
   logs) printf 'plugin-logs:%s\n' "$*" ;;
   inspect) printf '%s\n' "${FAKE_RUNNING:-true}" ;;
   run)
@@ -36,6 +43,15 @@ case "${1:-}" in
     ;;
   exec)
     shift
+    if [[ "${1:-}" == -i ]]; then
+      shift
+      printf '%s\n' "$@" >"${FAKE_MODEL_ARGS:?}"
+      printf '%s\n' "$1" >"${FAKE_MODEL_TARGET:?}"
+      if env | grep -qF -- "$(cat "${FAKE_KEY_FILE:?}")"; then exit 90; fi
+      shift
+      "$@"
+      exit $?
+    fi
     case "$1" in
       *--core)
         case "${2:-}" in
@@ -65,6 +81,15 @@ chmod +x "$bin/docker"
 # 一样退出；FAKE_ANSWER_FAIL=<卡片 id> 让那张卡的 POST 像被核心拒掉一样回 409。
 cat >"$bin/curl" <<'CURL'
 #!/usr/bin/env bash
+if [[ " $* " == *' --header @- '* ]]; then
+  IFS= read -r header
+  [[ "$header" == "Authorization: Bearer $(cat "${FAKE_KEY_FILE:?}")" ]] || exit 92
+  if [[ "${FAKE_MODEL_FAIL:-}" == upstream ]]; then
+    echo 'upstream unavailable' >&2
+    exit 7
+  fi
+  exit 0
+fi
 url="${*: -1}"
 method=GET
 body=""
@@ -117,7 +142,13 @@ PY
     ;;
   */upgrade*)
     [[ -n "${FAKE_HIT_FILE:-}" ]] && printf 'POST %s\n' "$url" >>"$FAKE_HIT_FILE"
+    for arg in "$@"; do
+      [[ "$arg" != Wonton-Plugin-Settings:* ]] || printf '%s\n' "${arg#*: }" >"${FAKE_HEADER_FILE:?}"
+    done
     cat "${FAKE_RESULT_FILE:?}"
+    ;;
+  */settings)
+    cat "${FAKE_STORED_FILE:?}"
     ;;
   *)
     printf '%s\n' "$FAKE_SETTINGS"
@@ -125,6 +156,18 @@ PY
 esac
 CURL
 chmod +x "$bin/curl"
+
+cat >"$bin/magpie" <<'MAGPIE'
+#!/usr/bin/env bash
+printf '%s\n' "${@:1:5}" >"${FAKE_MODEL_CALL:?}"
+[[ "${6:-}" == "key=$(cat "${FAKE_KEY_FILE:?}")" ]] || exit 91
+if [[ "${FAKE_MODEL_FAIL:-}" == cli ]]; then
+  printf 'provider rejected %s\n' "$6" >&2
+  exit 23
+fi
+printf 'provider accepted %s\n' "$6"
+MAGPIE
+chmod +x "$bin/magpie"
 
 failed=0
 # run <期望退出码> <变量…> -- <参数…>：跑 dev.sh，输出留在 $out、$err。
@@ -134,8 +177,8 @@ run() {
   local -a env=()
   while [[ "$1" != -- ]]; do env+=("$1"); shift; done
   shift
-  env "${env[@]}" PATH="$bin:$PATH" HOME="$work" WONTON_DEV_STATE="$state" \
-    bash "$root/scripts/dev.sh" "$@" >"$work/out" 2>"$work/err" || status=$?
+  env -u WONTON_PLUGIN "${env[@]}" PATH="$bin:$PATH" HOME="$work" WONTON_DEV_STATE="$state" \
+    bash "$repo/scripts/dev.sh" "$@" >"$work/out" 2>"$work/err" || status=$?
   out="$(cat "$work/out")"
   err="$(cat "$work/err")"
   if [[ $status == "$want" ]]; then return 0; fi
@@ -201,21 +244,21 @@ has "$out" "当前代理设置" "要查当前设置"
 has "$out" "读不到设置" "读不到设置要写原因"
 has "$out" "http_proxy=" "接口失败后后面的项照样跑"
 
-# approve：权限卡（ACP session/request_permission 转来的，选项带 choice_id）要把允许选项的
+# approve：权限卡（Agent 经核心 /agent/permissions 请的，选项带 choice_id）要把允许选项的
 # answer 和 choice_id 一起发，只发 answer 核心回 400；普通卡照旧只发 answer。
-cards='{"confirmations":[{"id":"perm-1","state":{"type":"pending"},"title":"dsh 想跑命令","choices":[{"answer":"approve","label":"允许一次","choice_id":"acp-0"},{"answer":"reject","label":"拒绝","choice_id":"acp-2"}]},{"id":"plain-1","state":{"type":"pending"},"title":"Hermes 想装插件","choices":[{"answer":"approve","label":"允许"}]}]}'
+cards='{"confirmations":[{"id":"perm-1","state":{"type":"pending"},"title":"Agent 想跑命令","choices":[{"answer":"approve","label":"允许一次","choice_id":"once"},{"answer":"reject","label":"拒绝","choice_id":"deny"}]},{"id":"plain-1","state":{"type":"pending"},"title":"Hermes 想装插件","choices":[{"answer":"approve","label":"允许"}]}]}'
 run 0 "FAKE_CARDS=$cards" -- approve || true
-has "$out" "已批准：dsh 想跑命令" "权限卡带 choice_id 批准"
+has "$out" "已批准：Agent 想跑命令" "权限卡带 choice_id 批准"
 has "$out" "已批准：Hermes 想装插件" "普通卡只发 answer"
 
 # 只有拒绝类选项的卡代批不了：如实写原因，退出码 1。
-rejonly='{"confirmations":[{"id":"rej-1","state":{"type":"pending"},"title":"dsh 想发网页","choices":[{"answer":"reject","label":"拒绝","choice_id":"acp-0"}]}]}'
+rejonly='{"confirmations":[{"id":"rej-1","state":{"type":"pending"},"title":"Agent 想发网页","choices":[{"answer":"reject","label":"拒绝","choice_id":"once"}]}]}'
 run 1 "FAKE_CARDS=$rejonly" -- approve || true
-has "$err" "没批准：dsh 想发网页：卡片上没有允许类的选项" "只有拒绝选项要写原因"
+has "$err" "没批准：Agent 想发网页：卡片上没有允许类的选项" "只有拒绝选项要写原因"
 
 # 核心拒掉其中一张：报核心给的原因，别的卡片照批。
 run 1 "FAKE_CARDS=$cards" "FAKE_ANSWER_FAIL=perm-1" -- approve || true
-has "$err" "没批准：dsh 想跑命令：这张卡片已经回答过了" "核心拒批要报核心的原因"
+has "$err" "没批准：Agent 想跑命令：这张卡片已经回答过了" "核心拒批要报核心的原因"
 has "$out" "已批准：Hermes 想装插件" "一张失败不影响下一张"
 
 # 列表接口挂了：报错退出。
@@ -244,6 +287,172 @@ has "$err" "装不了：这台主机缺 GPU" "blocked 要拦住升级"
 # 接口挂了：报错退出。
 run 1 FAKE_API=fail -- upgrade --yes || true
 has "$err" "预览失败" "接口挂了要报错"
+
+# --setting：按预览里的表单定类型，经 Wonton-Plugin-Settings 头（base64url JSON）上行，装完核对存下了。
+# eula 是装着时同意过的必填项（预览带着值），players 是带默认值的整数，mode 是单选。
+form='"settings":{"fields":[
+  {"name":"eula","title":"同意","required":true,"kind":{"type":"toggle"},"value":{"type":"flag","value":true},"default":null},
+  {"name":"players","title":"人数","required":false,"kind":{"type":"integer","min":1,"max":100},"value":null,"default":{"type":"integer","value":20}},
+  {"name":"mode","title":"模式","required":false,"kind":{"type":"choice","multiple":false,"options":[{"value":{"type":"text","value":"easy"},"title":"简单"}]},"value":null,"default":null}]}'
+printf '%s\n' "{\"title\":\"示例\",\"id\":\"com.example.app\",\"version\":\"1.2.4\",\"permissions\":[],\"notices\":[],\"blocked\":null,$form}" >"$work/settings-preview.json"
+sed 's/"value":{"type":"flag","value":true}/"value":null/' "$work/settings-preview.json" >"$work/unset-preview.json"
+stored() { # <players 存着的值>
+  printf '{"schema_digest":"sha256:x","form":{"fields":[{"name":"players","title":"人数","required":false,"kind":{"type":"integer"},"value":{"type":"integer","value":%s}},{"name":"mode","title":"模式","required":false,"kind":{"type":"text"},"value":{"type":"text","value":"easy"}}]}}\n' "$1" >"$work/stored.json"
+}
+stored 5
+export FAKE_HEADER_FILE="$work/header" FAKE_STORED_FILE="$work/stored.json"
+run 0 "FAKE_PREVIEW_FILE=$work/settings-preview.json" -- upgrade --yes --setting players=5 --setting mode=easy || true
+has "$out" "升级好了" "带设置值升级"
+has "$(python3 -c 'import base64,sys; v=sys.argv[1]; print(base64.urlsafe_b64decode(v + "=" * (-len(v) % 4)).decode())' "$(cat "$work/header")")" \
+  '{"players": {"type": "integer", "value": 5}, "mode": {"type": "text", "value": "easy"}}' "按表单的类型编码设置值"
+run 1 "FAKE_PREVIEW_FILE=$work/settings-preview.json" -- upgrade --yes --setting nope=1 || true
+has "$err" "这个插件没有设置 nope" "不认识的设置要报错"
+run 1 "FAKE_PREVIEW_FILE=$work/settings-preview.json" -- upgrade --yes --setting players=many || true
+has "$err" "设置 players 要整数" "类型不对要报错"
+run 1 "FAKE_PREVIEW_FILE=$work/settings-preview.json" -- upgrade --yes --setting mode=hard || true
+has "$err" "设置 mode 只能取这些值：easy" "选项外的值要报错"
+run 1 "FAKE_PREVIEW_FILE=$work/unset-preview.json" -- upgrade --yes || true
+has "$err" "必填的设置没有值：eula" "必填项没值要在发请求前报错"
+# 核心不认识这个头时照装、不存值：要报出来，不能当装好了。
+stored 20
+run 1 "FAKE_PREVIEW_FILE=$work/settings-preview.json" -- upgrade --yes --setting players=5 || true
+has "$err" "核心没存下给的设置值" "值没存下要报错"
+
+# model：执行容器里的探测与 CLI；key 不进入宿主 docker 参数、环境或输出。
+printf 'sk-test-only-1234\n' >"$work/model.key"
+export FAKE_KEY_FILE="$work/model.key" FAKE_MODEL_ARGS="$work/model.args"
+export FAKE_MODEL_TARGET="$work/model.target" FAKE_MODEL_CALL="$work/model.call"
+run 0 -- model http://192.0.2.10:3425/v1 provider/some-model "$work/model.key" || true
+has "$(cat "$FAKE_MODEL_TARGET")" "wonton-test--ai-usemagpie-magpie--magpie" "使用本实例模型网关"
+has "$(cat "$FAKE_MODEL_CALL")" "url=http://192.0.2.10:3425/v1" "CLI 接收上游地址"
+has "$(cat "$FAKE_MODEL_CALL")" "models=some-model" "CLI 过滤模型时去掉服务商前缀"
+if grep -qF 'sk-test-only-1234' "$FAKE_MODEL_ARGS" || [[ "$out$err" == *sk-test-only-1234* ]]; then
+  echo "FAIL key 出现在宿主 docker 参数或输出里" >&2
+  failed=$((failed + 1))
+fi
+printf 'WONTON_INSTANCE=another\n' >"$state/.env"
+run 0 -- model http://192.0.2.10/v1 m "$work/model.key" || true
+has "$(cat "$FAKE_MODEL_TARGET")" "wonton-another--ai-usemagpie-magpie--magpie" "切换实例时不碰别人的网关"
+printf 'WONTON_INSTANCE=test\n' >"$state/.env"
+
+run 1 FAKE_MODEL_FAIL=cli -- model http://192.0.2.10/v1 m "$work/model.key" || true
+has "$err" "provider rejected" "CLI 失败时保留原因"
+if [[ "$out$err" == *sk-test-only-1234* || "$out" == *"已向模型网关添加"* ]]; then
+  echo "FAIL CLI 失败泄漏 key 或报告成功" >&2
+  failed=$((failed + 1))
+fi
+: >"$FAKE_MODEL_CALL"
+run 1 FAKE_MODEL_FAIL=upstream -- model http://192.0.2.10/v1 m "$work/model.key" || true
+has "$err" "upstream unavailable" "上游不可达时报告原因"
+if [[ -s "$FAKE_MODEL_CALL" ]]; then
+  echo "FAIL 上游不可达时仍然添加服务商" >&2
+  failed=$((failed + 1))
+fi
+run 1 FAKE_RUNNING=false -- model http://192.0.2.10/v1 m "$work/model.key" || true
+has "$err" "模型网关容器" "网关容器未运行时报告原因"
+
+# Linux 上 host.docker.internal 换成模型网关插件网络的网关地址；Docker Desktop、OrbStack 上原样用。
+run 0 FAKE_GATEWAY=198.51.100.1 -- model http://host.docker.internal:3425/v1 m "$work/model.key" || true
+has "$(cat "$FAKE_MODEL_CALL")" "url=http://198.51.100.1:3425/v1" "Linux 上换成网关地址"
+run 0 "FAKE_OS=Docker Desktop" -- model http://host.docker.internal:3425/v1 m "$work/model.key" || true
+has "$(cat "$FAKE_MODEL_CALL")" "url=http://host.docker.internal:3425/v1" "Docker Desktop 上原样用"
+run 1 -- model http://host.docker.internal:3425/v1 m "$work/model.key" || true
+has "$err" "查询模型网关的插件网络失败" "查询网络失败要报错"
+run 1 FAKE_INFO_FAIL=1 -- model http://host.docker.internal:3425/v1 m "$work/model.key" || true
+has "$err" "查不到 Docker 的运行环境" "Docker 信息查询失败要报错"
+
+# key 文件读不到、为空或非法，地址不像地址：报错。
+run 1 -- model http://192.0.2.10/v1 m "$work/nope.key" || true
+has "$err" "读不到 key 文件" "key 文件不存在要报错"
+: >"$work/empty.key"
+run 1 -- model http://192.0.2.10/v1 m "$work/empty.key" || true
+has "$err" "读不到 key 文件" "空 key 文件要报错"
+printf 'invalid key\n' >"$work/invalid.key"
+run 1 -- model http://192.0.2.10/v1 m "$work/invalid.key" || true
+has "$err" "key 文件里应该只有一行" "非法 key 要报错"
+run 1 -- model 192.0.2.10/v1 m "$work/model.key" || true
+has "$err" "上游地址要以 http:// 或 https:// 开头" "地址不对要报错"
+
+# 附加检查的子项：extra_item 记的每一行成为“附加检查·<子项>”，汇总一行按最坏的算。
+extra_out() { # <extra_check 的函数体>
+  (
+    set +eu
+    PROBES_LOG="$work/probes.log" SMOKE_STATE="$work/marker"
+    : >"$PROBES_LOG"
+    # shellcheck source=scripts/lib.sh
+    . "$root/scripts/lib.sh"
+    # shellcheck source=scripts/probes.sh
+    . "$root/scripts/probes.sh"
+    eval "extra_check() { $1; }"
+    probes_extra
+  )
+}
+out="$(extra_out 'extra_item PASS 甲 好了; extra_item N/A 乙 没给镜像')"
+has "$out" "PASS 附加检查·甲：好了" "PASS 子项原样打印"
+has "$out" "N/A  附加检查·乙：没给镜像" "N/A 子项原样打印"
+has "$out" "PASS 附加检查：1 个子项通过" "有通过、没有失败时汇总通过"
+out="$(extra_out 'extra_item PASS 甲 好了; extra_item FAIL 乙 "坏了
+第二行"')"
+has "$out" "FAIL 附加检查·乙：坏了 第二行" "说明里的换行换成空格"
+has "$out" "FAIL 附加检查：子项失败：乙" "任一子项失败时汇总失败"
+out="$(extra_out 'extra_item N/A 甲 不适用')"
+has "$out" "N/A  附加检查：1 个子项都没测" "子项全是 N/A 时汇总 N/A"
+out="$(extra_out 'echo 只看返回值; return 3')"
+has "$out" "FAIL 附加检查：extra_check 失败（退出 3）" "钩子返回非 0 时失败"
+out="$(extra_out 'echo 只看返回值')"
+has "$out" "PASS 附加检查：extra_check 通过" "没记子项时只看返回值"
+
+# smoke-gpu.sh：核心 plugin host 的标准错误（没缓存镜像时的拉取进度）不能混进 JSON。假 docker 只在这一段用。
+gbin="$work/gbin"
+gplugin="$work/gplugin"
+mkdir -p "$gbin" "$gplugin"
+printf 'x-wonton:\n  permissions: [devices.gpu]\n' >"$gplugin/docker-compose.yml"
+cat >"$gbin/docker" <<'DOCKER'
+#!/usr/bin/env bash
+case "${1:-}" in
+  compose) printf '%s\n' '{"x-wonton":{"permissions":["devices.gpu"]}}' ;;
+  run)
+    # 真的 docker run 没缓存镜像时把拉取进度写到标准错误，核心的 JSON 只在标准输出。
+    printf "Unable to find image 'core:latest' locally\nlatest: Pulling from core\n" >&2
+    case "${FAKE_GPU_HOST:-}" in
+      met) printf '%s\n' '{"requirements":[{"status":"met","text":"GPU"}]}' ;;
+      unmet) printf '%s\n' '{"requirements":[{"status":"unmet","text":"需要 GPU"}]}' ;;
+      badjson) printf 'not json\n' ;;
+      crash) printf 'core crashed\n' >&2; exit 1 ;;
+    esac
+    ;;
+  *) exit 1 ;;
+esac
+DOCKER
+chmod +x "$gbin/docker"
+# gpu_smoke <FAKE_GPU_HOST>：跑 smoke-gpu.sh，结果留在 $gout（标准输出和错误合并）、$gstatus、$gruns。
+gpu_smoke() {
+  local status=0
+  : >"$work/github_output"
+  # shellcheck disable=SC2031 # root 只在脚本开头赋值一次，没有子 shell 改它（误报）
+  env FAKE_GPU_HOST="$1" GITHUB_OUTPUT="$work/github_output" PATH="$gbin:$PATH" \
+    bash "$root/scripts/smoke-gpu.sh" "$gplugin" >"$work/gout" 2>&1 || status=$?
+  gout="$(cat "$work/gout")"
+  gstatus=$status
+  gruns="$(cat "$work/github_output")"
+}
+gpu_smoke met
+if [[ $gstatus == 0 && "$gruns" == run=true ]]; then :; else
+  echo "FAIL stderr 有拉取杂讯、stdout 是合法 JSON：应该通过（退出 $gstatus）" >&2
+  printf '%s\n' "$gout" >&2
+  failed=$((failed + 1))
+fi
+gpu_smoke unmet
+if [[ $gstatus == 77 && "$gruns" == run=false ]]; then :; else
+  echo "FAIL 显卡不可用应该跳过（退出 $gstatus）" >&2
+  printf '%s\n' "$gout" >&2
+  failed=$((failed + 1))
+fi
+gpu_smoke badjson
+has "$gout" "不是有效 JSON" "输出不是 JSON 要报错"
+has "$gout" "Unable to find image" "失败时打印标准错误，方便取证"
+gpu_smoke crash
+has "$gout" "core crashed" "核心退出非 0 时打印标准错误"
 
 if ((failed > 0)); then
   echo "$failed 处失败" >&2
