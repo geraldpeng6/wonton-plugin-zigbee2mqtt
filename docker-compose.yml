@@ -73,13 +73,13 @@ x-wonton:
 
       打开网页可以看设备、改名字、控制开关。支持的设备列表见 zigbee2mqtt.io。
 
-      需要先装一个提供 MQTT 的插件（如 mosquitto）；装插件时按提示选协调器设备。用网络协调器（不插棒子）时在插件设置里把协调器地址改成 tcp://地址:端口。
+      需要先装一个提供 MQTT 的插件（如 mosquitto）；装插件时按提示选协调器设备。用网络协调器（不插棒子）时在插件设置里把协调器地址改成 tcp://地址:端口，并按型号选适配器类型。
     en: |
       Plug a Zigbee coordinator stick into your home server and connect Zigbee sensors, switches and lights from any brand through one hub. Device state and control flow over MQTT, ready for Home Assistant and other tools.
 
       Open the web page to see devices, rename them and control them. Supported devices are listed at zigbee2mqtt.io.
 
-      Requires a plugin that provides MQTT (such as mosquitto); pick the coordinator device when prompted during install. For a network coordinator (no stick), set the coordinator address to tcp://host:port in the plugin settings.
+      Requires a plugin that provides MQTT (such as mosquitto); pick the coordinator device when prompted during install. For a network coordinator (no stick), set the coordinator address to tcp://host:port in the plugin settings and pick the adapter model.
   release_notes:
     zh: 首个版本：Zigbee 设备接入，网页管理和 MQTT 转发。
     en: "First release: Zigbee device support with web management and MQTT."
@@ -87,10 +87,10 @@ x-wonton:
     service: zigbee2mqtt
     port: 8080
     sso: none
-  # 网络协调器（tcp://、mdns://）在主人的局域网里，没有出网权限连不上。
+  # 出网给上游下载设备 OTA 固件用；局域网里的网络协调器由插件容器直连，不经过出网代理。
   permissions: [network.egress, devices.serial]
   # 核心在安装时让主人从宿主的串口设备中选一个，选中的设备挂到固定的容器路径。
-  # optional 允许用户改用 tcp:// 或 mdns:// 网络协调器而不选择串口设备。
+  # optional 允许用户改用 tcp:// 网络协调器而不选择串口设备。
   devices:
     serial:
       - { service: zigbee2mqtt, target: /dev/zigbee, optional: true }

@@ -11,10 +11,10 @@
       "pattern": "^(tcp://|mdns://|/dev/)",
       "x-wonton-title": { "zh": "协调器地址", "en": "Coordinator address", "zh-Hant": "協調器位址", "ja": "コーディネーターアドレス" },
       "x-wonton-description": {
-        "zh": "安装时选的 USB 棒在容器里固定为 /dev/zigbee；网络协调器填 tcp://地址:端口 或 mdns://名称",
-        "en": "The USB stick selected at install is /dev/zigbee in the container; network coordinators use tcp://host:port or mdns://name",
-        "zh-Hant": "安裝時選的 USB 棒在容器裡固定為 /dev/zigbee；網路協調器填 tcp://位址:連接埠 或 mdns://名稱",
-        "ja": "インストール時に選んだ USB スティックはコンテナー内の /dev/zigbee。ネットワーク機器は tcp://ホスト:ポート または mdns://名前"
+        "zh": "安装时选的 USB 棒在容器里固定为 /dev/zigbee；网络协调器填 tcp://地址:端口（mdns://名称要靠网络广播）",
+        "en": "The USB stick selected at install is /dev/zigbee in the container; network coordinators use tcp://host:port (mdns://name relies on network multicast)",
+        "zh-Hant": "安裝時選的 USB 棒在容器裡固定為 /dev/zigbee；網路協調器填 tcp://位址:連接埠（mdns://名稱要靠網路廣播）",
+        "ja": "インストール時に選んだ USB スティックはコンテナー内の /dev/zigbee。ネットワーク機器は tcp://ホスト:ポート（mdns://名前はネットワークのマルチキャストが必要）"
       }
     },
     "adapter": {
